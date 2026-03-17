@@ -4,10 +4,32 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# Collect common PE extensions
-VALID_EXTS = {".exe", ".dll", ".sys", ".ocx", ".cpl", ".scr"}
-
 PE_MAGIC = b"MZ"
+
+EXCLUDE_DIRS = [
+    Path(r"C:\Windows\System32"),
+    Path(r"C:\Windows\SysWOW64"),
+    Path(r"C:\Program Files (x86)"),
+]
+
+TRUSTED_PATH_KEYWORDS = [
+    "PortableApps",
+    "Program Files",
+    "Program Files (x86)"
+]
+
+MIN_SIZE = 10 * 1024      # 10KB
+MAX_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+def is_excluded(path: Path):
+    for ex in EXCLUDE_DIRS:
+        try:
+            path.relative_to(ex)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def is_probably_pe(path: Path):
@@ -16,6 +38,11 @@ def is_probably_pe(path: Path):
             return f.read(2) == PE_MAGIC
     except:
         return False
+
+
+def is_reasonable_size(path: Path):
+    size = path.stat().st_size
+    return MIN_SIZE <= size <= MAX_SIZE
 
 
 def sha256_file(path: Path):
@@ -38,6 +65,22 @@ def get_signature_status(path: Path):
         return out.strip()
     except:
         return None
+
+
+def is_trusted_source(path: Path):
+    p_str = str(path)
+    return any(k in p_str for k in TRUSTED_PATH_KEYWORDS)
+
+
+def is_junk_exe(path: Path):
+    name = path.name.lower()
+
+    junk_keywords = [
+        "setup", "install", "update", "unins",
+        "helper", "launcher", "crash", "report"
+    ]
+
+    return any(k in name for k in junk_keywords)
 
 
 def safe_copy(src: Path, dst: Path):
@@ -65,7 +108,7 @@ def unique_dest(dst_dir: Path, src: Path):
         i += 1
 
 
-def collect_from_source(src_dir: Path, out_dir: Path, max_files=10000):
+def collect_research_benign(root_dir: Path, out_dir: Path, max_files=30000):
 
     manifest = out_dir / "manifest.jsonl"
     seen_hashes = set()
@@ -79,12 +122,11 @@ def collect_from_source(src_dir: Path, out_dir: Path, max_files=10000):
 
     scanned = copied = skipped = dupes = errors = 0
 
-    print(f"\nScanning {src_dir}")
-    print(f"Saving to {out_dir}")
+    print(f"\n[+] Research-grade scan started")
 
     with manifest.open("a", encoding="utf-8") as mf:
 
-        for p in src_dir.rglob("*"):
+        for p in root_dir.rglob("*.exe"):
 
             if copied >= max_files:
                 break
@@ -92,20 +134,27 @@ def collect_from_source(src_dir: Path, out_dir: Path, max_files=10000):
             if not p.is_file():
                 continue
 
-            scanned += 1
-
-            ext = p.suffix.lower()
-
-            if ext not in VALID_EXTS:
+            if is_excluded(p):
                 continue
+
+            scanned += 1
 
             if not is_probably_pe(p):
                 skipped += 1
                 continue
 
+            if not is_reasonable_size(p):
+                skipped += 1
+                continue
+
+            if is_junk_exe(p):
+                skipped += 1
+                continue
+
             sig = get_signature_status(p)
 
-            if sig != "Valid":
+            # trust logic
+            if sig != "Valid" and not is_trusted_source(p):
                 skipped += 1
                 continue
 
@@ -119,9 +168,7 @@ def collect_from_source(src_dir: Path, out_dir: Path, max_files=10000):
                 dupes += 1
                 continue
 
-            # create extension folder
-            ext_folder = out_dir / ext.replace(".", "")
-            dst = unique_dest(ext_folder, p)
+            dst = unique_dest(out_dir, p)
 
             err = safe_copy(p, dst)
 
@@ -136,41 +183,23 @@ def collect_from_source(src_dir: Path, out_dir: Path, max_files=10000):
                 "src": str(p),
                 "dst": str(dst),
                 "sha256": h,
-                "signature": sig,
-                "type": ext
+                "signature": sig
             }) + "\n")
 
-            if copied % 200 == 0:
-                print(f"copied={copied} scanned={scanned}")
+            if copied % 500 == 0:
+                print(f"[+] copied={copied} scanned={scanned}")
 
-    print("\nFinished")
-    print(f"scanned={scanned}")
-    print(f"copied={copied}")
-    print(f"skipped={skipped}")
-    print(f"dupes={dupes}")
-    print(f"errors={errors}")
+    print("\n[✓] Done")
+    print(f"scanned={scanned}, copied={copied}, skipped={skipped}, dupes={dupes}, errors={errors}")
 
 
 def main():
+    root = Path(r"C:\\")
+    output = Path(r"C:\\benign_research")
 
-    sources = {
-        # "system32": Path(r"C:\Windows\System32"),
-        # "syswow64": Path(r"C:\Windows\SysWOW64"),
-        "programfiles_x86": Path(r"C:\Program Files (x86)"),
-    }
+    output.mkdir(parents=True, exist_ok=True)
 
-    base_output = Path(r"C:\benign")
-
-    for name, src in sources.items():
-
-        if not src.exists():
-            print(f"Skipping missing folder: {src}")
-            continue
-
-        dest = base_output / name
-        dest.mkdir(parents=True, exist_ok=True)
-
-        collect_from_source(src, dest)
+    collect_research_benign(root, output)
 
 
 if __name__ == "__main__":
